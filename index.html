@@ -1,0 +1,243 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <meta name="referrer" content="no-referrer" />
+  <meta http-equiv="Content-Security-Policy" content="
+    default-src 'self';
+    connect-src 'none';
+    img-src 'self' blob: data:;
+    script-src 'self' 'unsafe-inline';
+    style-src 'self' 'unsafe-inline';
+    base-uri 'none';
+    form-action 'none';
+    frame-ancestors 'none';
+  ">
+  <title>Local Paste</title>
+
+  <style>
+    :root { color-scheme: light dark; --r: 16px; }
+    body{
+      margin:0; min-height:100vh; display:grid; place-items:center; padding:24px;
+      font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
+      background:
+        radial-gradient(900px 420px at 10% 0%, rgba(99,102,241,.20), transparent 60%),
+        radial-gradient(900px 420px at 95% 20%, rgba(16,185,129,.16), transparent 55%),
+        #0b1020;
+      color:#e9ecf5;
+    }
+    .card{
+      width:min(920px, 100%);
+      background:rgba(255,255,255,.06);
+      border:1px solid rgba(255,255,255,.12);
+      border-radius:var(--r);
+      padding:16px;
+      backdrop-filter: blur(10px);
+    }
+    .top{ display:flex; gap:12px; flex-wrap:wrap; align-items:baseline; justify-content:space-between; }
+    h1{ margin:0; font-size:16px; letter-spacing:.2px; }
+    .hint{ margin:0; opacity:.85; font-size:13px; }
+    .zone{
+      margin-top:12px;
+      border-radius:calc(var(--r) - 4px);
+      border:1px dashed rgba(255,255,255,.26);
+      background:rgba(0,0,0,.18);
+      padding:16px;
+      outline:none;
+    }
+    .zone:focus{ border-color: rgba(99,102,241,.75); box-shadow: 0 0 0 4px rgba(99,102,241,.18); }
+    .row{ display:flex; gap:10px; flex-wrap:wrap; margin-top:12px; }
+    button, a.btn{
+      border:1px solid rgba(255,255,255,.18);
+      background:rgba(255,255,255,.08);
+      color:inherit;
+      border-radius:12px;
+      padding:10px 12px;
+      cursor:pointer;
+      text-decoration:none;
+      font-size:14px;
+    }
+    button.primary{ border-color: rgba(99,102,241,.55); background: rgba(99,102,241,.18); }
+    .grid{ margin-top:12px; display:grid; grid-template-columns: 1.2fr .8fr; gap:12px; }
+    @media (max-width: 860px){ .grid{ grid-template-columns:1fr; } }
+    .preview{
+      border:1px solid rgba(255,255,255,.12);
+      background:rgba(0,0,0,.18);
+      border-radius:14px;
+      min-height:220px;
+      display:grid; place-items:center;
+      overflow:hidden;
+    }
+    .preview img{ max-width:100%; height:auto; display:block; }
+    .meta{
+      border:1px solid rgba(255,255,255,.12);
+      background:rgba(0,0,0,.18);
+      border-radius:14px;
+      padding:12px;
+      font-size:13px;
+      opacity:.92;
+    }
+    code{ font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; }
+    .muted{ opacity:.82; }
+    .ok{ color:#a7f3d0; }
+    .err{ color:#fecaca; }
+    #sink{ position:fixed; left:-9999px; top:0; width:1px; height:1px; opacity:0; }
+  </style>
+</head>
+
+<body>
+  <main class="card">
+    <div class="top">
+      <h1>Local Paste (no upload)</h1>
+      <p class="hint">Click the box → press <code>Ctrl/⌘+V</code> or hit “Paste”.</p>
+    </div>
+
+    <div id="zone" class="zone" tabindex="0">
+      <div class="muted">Paste an image from clipboard or drag & drop an image file.</div>
+      <div id="status" class="muted" style="margin-top:8px">Status: waiting…</div>
+    </div>
+
+    <div class="row">
+      <button id="btnRead" class="primary" type="button">Paste</button>
+      <button id="btnClear" type="button">Clear</button>
+      <a id="btnDl" class="btn" href="#" download="pasted.png" style="display:none">Download</a>
+    </div>
+
+    <div class="grid">
+      <section class="preview">
+        <div id="empty" class="muted">Preview appears here</div>
+        <img id="img" alt="Preview" style="display:none" />
+      </section>
+
+      <aside class="meta">
+        <div>Name: <span id="mName">—</span></div>
+        <div>MIME: <span id="mType">—</span></div>
+        <div>Size: <span id="mSize">—</span></div>
+        <div class="muted" style="margin-top:10px">
+          <!-- English comment: No network calls; everything stays in-memory. -->
+          No tracking and no uploads: the image stays in this tab’s memory.
+        </div>
+      </aside>
+    </div>
+  </main>
+
+  <textarea id="sink" aria-hidden="true"></textarea>
+
+  <script>
+    const zone = document.getElementById('zone');
+    const sink = document.getElementById('sink');
+    const statusEl = document.getElementById('status');
+
+    const img = document.getElementById('img');
+    const empty = document.getElementById('empty');
+
+    const btnRead = document.getElementById('btnRead');
+    const btnClear = document.getElementById('btnClear');
+    const btnDl = document.getElementById('btnDl');
+
+    const mName = document.getElementById('mName');
+    const mType = document.getElementById('mType');
+    const mSize = document.getElementById('mSize');
+
+    let url = null;
+
+    const setStatus = (text, kind) => {
+      statusEl.textContent = 'Status: ' + text;
+      statusEl.className = kind === 'ok' ? 'ok' : kind === 'err' ? 'err' : 'muted';
+    };
+
+    const show = (file, nameFallback = 'pasted.png') => {
+      if (!file) return;
+      if (url) URL.revokeObjectURL(url);
+      url = URL.createObjectURL(file);
+
+      img.src = url;
+      img.style.display = 'block';
+      empty.style.display = 'none';
+
+      const name = file.name && file.name !== 'blob' ? file.name : nameFallback;
+      mName.textContent = name;
+      mType.textContent = file.type || '—';
+      mSize.textContent = ((file.size || 0) / 1024).toFixed(1) + ' KB';
+
+      btnDl.href = url;
+      btnDl.download = name;
+      btnDl.style.display = 'inline-block';
+
+      setStatus('image ready', 'ok');
+    };
+
+    const clear = () => {
+      if (url) URL.revokeObjectURL(url);
+      url = null;
+
+      img.removeAttribute('src');
+      img.style.display = 'none';
+      empty.style.display = 'block';
+
+      mName.textContent = '—';
+      mType.textContent = '—';
+      mSize.textContent = '—';
+
+      btnDl.style.display = 'none';
+      setStatus('waiting…');
+    };
+
+    // Ctrl/⌘+V paste
+    sink.addEventListener('paste', (e) => {
+      const dt = e.clipboardData;
+      if (!dt?.items) return;
+
+      for (const item of dt.items) {
+        if (item.kind === 'file' && item.type?.startsWith('image/')) {
+          e.preventDefault();
+          show(item.getAsFile());
+          return;
+        }
+      }
+      setStatus('no image in clipboard', 'err');
+    });
+
+    // Focus so paste works reliably
+    zone.addEventListener('click', () => { sink.focus(); setStatus('press Ctrl/⌘+V'); });
+    zone.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' || e.key === ' ') { sink.focus(); setStatus('press Ctrl/⌘+V'); }
+    });
+
+    // Drag & drop (optional)
+    zone.addEventListener('dragover', (e) => e.preventDefault());
+    zone.addEventListener('drop', (e) => {
+      e.preventDefault();
+      const f = e.dataTransfer?.files?.[0];
+      if (f && f.type?.startsWith('image/')) show(f, f.name || 'dropped.png');
+      else setStatus('drop an image file', 'err');
+    });
+
+    // Button paste via Async Clipboard API
+    btnRead.addEventListener('click', async () => {
+      try {
+        if (!navigator.clipboard?.read) {
+          setStatus('Clipboard read() not supported; use Ctrl/⌘+V', 'err');
+          sink.focus();
+          return;
+        }
+        const items = await navigator.clipboard.read();
+        for (const it of items) {
+          const t = it.types?.find(x => x.startsWith('image/'));
+          if (!t) continue;
+          const blob = await it.getType(t);
+          show(new File([blob], 'pasted.' + (t.split('/')[1] || 'png'), { type: t }));
+          return;
+        }
+        setStatus('no image in clipboard', 'err');
+      } catch {
+        setStatus('permission denied / not allowed', 'err');
+      }
+    });
+
+    btnClear.addEventListener('click', clear);
+    clear();
+  </script>
+</body>
+</html>
